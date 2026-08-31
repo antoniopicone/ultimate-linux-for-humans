@@ -114,6 +114,10 @@ An overview of my Linux setup: distro, desktop environment, system tooling, and 
 
   - Repo: [https://github.com/antoniopicone/gnome-display-color-correction-extension](https://github.com/antoniopicone/gnome-display-color-correction-extension)
 
+  - Published on [Gnome Extensions](https://extensions.gnome.org/extension/10321/display-color-correction/)
+
+--- 
+
 - **Wake on USB** (gist): https://gist.github.com/antoniopicone/812fab59aba535a70e8ed3258b479534
 - **Touchpad scrolling:** Wayland Scroll Factor (0.18 vertical scroll)
 - **Icon set:** Yaru (Prussian Green Dark), installed via `yay -S yaru-icon-theme`
@@ -126,3 +130,4 @@ An overview of my Linux setup: distro, desktop environment, system tooling, and 
 - Podman
 - Avahi-daemon
 - restic
+- USBGuard
