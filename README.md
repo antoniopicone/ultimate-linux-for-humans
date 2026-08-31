@@ -2,18 +2,41 @@
 
 An overview of my Linux setup: distro, desktop environment, system tooling, and a few handcrafted pieces of software to fill the gaps left by commercial ecosystems.
 
-- **Distro:** CachyOS
-- **DE:** GNOME / Hyprland + Niri + Dank
+- **Base Distro:** Ubuntu Desktop 26.04 LTS
+- **DE:** GNOME (but I'm thinking to swith to Hyprland + Niri + Dank)
 
 ---
 
 ## Core Features
 
-- **Filesystem:** BTRFS
-- **Swap/RAM compression:** zram
 - **Kernel:**
   - Optimized for x86_v3 and LTO
-  - Scheduler: BORE (better for desktop)
+  - 7.1 to have out of the box:
+    - Low-Latency Preemptive Kernel
+    - 1000 Hz timer, idle tickless, -O3 optimization
+    - Built with gcc and '-march=native' optimizations.
+  - patches:
+    - AMD P-State driver
+    - BMQ Scheduler
+    - BBR3 TCP congestion control
+    - Multi-generational LRU
+    - Adaptive Deadline I/O Scheduler (ADIOS)
+    - CachyOS patches
+    - Lucjan patches
+    - Xanmod patches
+    - PF-kernel patches
+    - FUTEX Proton/Wine Fsync support
+    - NT sync primitives emulation driver
+    - Steamdeck/Valve patches
+    - Graysky GCC optimizations
+    - Various arch patches
+    - IO scheduler patches
+    - AUFS support
+    - VirtualBox support
+    - Compiled with LLVM/Clang instead of GCC
+- **Scheduler:** BORE (better for desktop)
+- **Filesystem:** BTRFS
+- **Swap/RAM compression:** zram
 - **Boot manager:** Limine (supports snapper and BTRFS)
 
 ---
