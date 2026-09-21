@@ -164,6 +164,129 @@ choose_partition() {
 }
 
 # ---------------------------------------------------------------------------
+# 1bis. Elenco/selezione DISCHI interi + partizionamento da zero
+#       (usato quando non ci sono partizioni utilizzabili, o su richiesta
+#       esplicita dell'utente anche in presenza di partizioni già pronte)
+# ---------------------------------------------------------------------------
+list_disks() {
+  echo
+  lsblk -d -o NAME,PATH,SIZE,TYPE,TRAN,RM,MODEL
+  echo
+}
+
+# Prova a individuare il/i disco/i che ospitano il sistema live in corso
+# (USB di avvio, ISO montata, ecc.), per escluderli dalla lista di dischi
+# formattabili. È un best-effort: su alcune live basate su casper il
+# supporto reale non è sempre risalibile da un mountpoint singolo, quindi
+# resta comunque un avviso esplicito nella UI, non un blocco assoluto.
+detect_live_disks() {
+  local mp src pk
+  for mp in / /cdrom /run/live/medium; do
+    src=$(findmnt -no SOURCE "$mp" 2>/dev/null || true)
+    [ -z "$src" ] && continue
+    pk=$(lsblk -rno PKNAME "$src" 2>/dev/null || true)
+    if [ -n "$pk" ]; then
+      echo "/dev/$pk"
+    else
+      echo "$src"
+    fi
+  done | sort -u
+}
+
+choose_disk() {
+  local prompt="$1"
+  local -a exclude=()
+  while IFS= read -r d; do
+    [ -n "$d" ] && exclude+=("$d")
+  done < <(detect_live_disks)
+
+  local -a candidates=()
+  while IFS= read -r d; do
+    local skip=0 e
+    for e in ${exclude[@]+"${exclude[@]}"}; do
+      [ "$d" = "$e" ] && skip=1
+    done
+    [ "$skip" -eq 1 ] && continue
+    candidates+=("$d")
+  done < <(lsblk -drno PATH,TYPE | awk '$2=="disk"{print $1}')
+
+  [ "${#candidates[@]}" -gt 0 ] || die "Nessun disco disponibile (esclusi quelli che sembrano ospitare il sistema live)."
+
+  echo "$prompt" >&2
+  if [ "${#exclude[@]}" -gt 0 ]; then
+    log_warn "Esclusi dalla lista perché sembrano ospitare il sistema live: ${exclude[*]}"
+  fi
+  local i=1
+  for c in "${candidates[@]}"; do
+    local size model tran rm
+    size=$(lsblk -drno SIZE "$c")
+    model=$(lsblk -drno MODEL "$c")
+    tran=$(lsblk -drno TRAN "$c")
+    rm=$(lsblk -drno RM "$c")
+    printf '  %2d) %-14s %-8s tran=%-6s rimovibile=%-3s %s\n' \
+      "$i" "$c" "$size" "${tran:-?}" "$([ "$rm" = "1" ] && echo si || echo no)" "${model:-?}" >&2
+    i=$((i + 1))
+  done
+
+  local choice
+  while true; do
+    read -rp "Numero: " choice
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#candidates[@]}" ]; then
+      echo "${candidates[$((choice - 1))]}"
+      return 0
+    fi
+    log_err "Scelta non valida." >&2
+  done
+}
+
+# Ripartiziona un disco intero da zero: GPT con ESP (FAT32, tipo ef00) +
+# una partizione per LUKS2 (tipo 8309 "Linux LUKS") sul resto del disco.
+# Imposta EFI_PART/LUKS_PART/FORMAT_ESP al termine.
+partition_whole_disk() {
+  local disk esp_size_mib
+  disk="$(choose_disk "Scegli il disco da RIPARTIZIONARE INTERAMENTE (tabella partizioni ricreata da zero):")"
+
+  read -rp "Dimensione partizione EFI in MiB [1024]: " esp_size_mib
+  esp_size_mib="${esp_size_mib:-1024}"
+  [[ "$esp_size_mib" =~ ^[0-9]+$ ]] || die "Dimensione non valida."
+
+  echo
+  log_warn "TUTTI I DATI su $disk verranno DISTRUTTI (tabella partizioni ricreata da zero, GPT: ESP ${esp_size_mib}MiB + resto del disco per LUKS2)."
+  lsblk "$disk"
+  read -rp "Digita ESATTAMENTE il device ($disk) per confermare: " confirm_dev
+  [ "$confirm_dev" = "$disk" ] || die "Conferma non corrispondente, interrotto per sicurezza."
+
+  # cleanup best-effort di residui di un tentativo precedente su questo stesso disco
+  cryptsetup close "$LUKS_MAPPER_NAME" 2>/dev/null || true
+  local p
+  for p in $(lsblk -rno PATH,TYPE "$disk" 2>/dev/null | awk '$2=="part"{print $1}'); do
+    umount -R "$p" 2>/dev/null || true
+  done
+
+  log_info "Azzero la tabella partizioni di $disk..."
+  wipefs -a "$disk" >/dev/null
+  sgdisk --zap-all "$disk" >/dev/null
+
+  log_info "Creo ESP (${esp_size_mib}MiB, tipo ef00) e partizione LUKS2 (resto del disco, tipo 8309)..."
+  sgdisk -n1:1MiB:+"${esp_size_mib}"MiB -t1:ef00 -c1:EFISYS "$disk" >/dev/null
+  sgdisk -n2:0:0 -t2:8309 -c2:cryptroot "$disk" >/dev/null
+
+  partprobe "$disk" 2>/dev/null || true
+  udevadm settle 2>/dev/null || true
+  sleep 1
+
+  local -a newparts=()
+  while IFS= read -r p; do newparts+=("$p"); done \
+    < <(lsblk -rno PATH,TYPE "$disk" | awk '$2=="part"{print $1}' | sort)
+  [ "${#newparts[@]}" -eq 2 ] || die "Attese 2 partizioni su $disk dopo il partizionamento, trovate ${#newparts[@]}: ${newparts[*]:-nessuna}."
+
+  EFI_PART="${newparts[0]}"
+  LUKS_PART="${newparts[1]}"
+  FORMAT_ESP=1   # partizione appena creata, va formattata sempre
+  log_info "Create: ESP=$EFI_PART, LUKS=$LUKS_PART"
+}
+
+# ---------------------------------------------------------------------------
 # 2. Dati utente
 # ---------------------------------------------------------------------------
 prompt_user_details() {
@@ -215,7 +338,9 @@ EOF
 # ---------------------------------------------------------------------------
 # 4. ESP
 # ---------------------------------------------------------------------------
-setup_esp() {
+# Decide se formattare l'ESP scelta a mano (non chiamata se la partizione è
+# stata appena creata da partition_whole_disk, che imposta già FORMAT_ESP=1).
+decide_esp_format() {
   local fstype
   fstype=$(lsblk -rno FSTYPE "$EFI_PART")
   if [ "$fstype" = "vfat" ]; then
@@ -225,6 +350,9 @@ setup_esp() {
     log_warn "$EFI_PART non è FAT32/vfat (fstype=${fstype:-vuoto}): verrà formattata obbligatoriamente."
     FORMAT_ESP=1
   fi
+}
+
+setup_esp() {
   if [ "$FORMAT_ESP" = "1" ]; then
     mkfs.vfat -F32 -n EFISYS "$EFI_PART"
   fi
@@ -545,44 +673,44 @@ cat > /usr/local/bin/limine-snapshot-sync <<'SYNCEOF'
 #!/usr/bin/env bash
 set -euo pipefail
 ESP=/boot/efi
-CONF="$ESP/limine.conf"
-KVER="$(cd /boot && ls vmlinuz-* 2>/dev/null | sed 's/^vmlinuz-//' | sort -V | tail -1)"
+CONF="\$ESP/limine.conf"
+KVER="\$(cd /boot && ls vmlinuz-* 2>/dev/null | sed 's/^vmlinuz-//' | sort -V | tail -1)"
 
-TMP="$(mktemp)"
-awk '/#### LIMINE-SNAPSHOT-SYNC:BEGIN/{print;f=1;next} /#### LIMINE-SNAPSHOT-SYNC:END/{f=0} !f' "$CONF" > "$TMP"
+TMP="\$(mktemp)"
+awk '/#### LIMINE-SNAPSHOT-SYNC:BEGIN/{print;f=1;next} /#### LIMINE-SNAPSHOT-SYNC:END/{f=0} !f' "\$CONF" > "\$TMP"
 
 {
   echo "#### LIMINE-SNAPSHOT-SYNC:BEGIN"
   echo "//+Snapshot root"
   if command -v snapper >/dev/null 2>&1; then
     snapper -c root list --columns number,date,description --disable-used-space 2>/dev/null | tail -n +3 | while IFS='|' read -r num date desc; do
-      num="$(echo "$num" | tr -d ' ')"
-      [ -z "$num" ] && continue
-      cleandesc="$(echo "$desc" | sed 's/^ *//;s/ *$//')"
-      echo "    //Snapshot #$num - $cleandesc"
+      num="\$(echo "\$num" | tr -d ' ')"
+      [ -z "\$num" ] && continue
+      cleandesc="\$(echo "\$desc" | sed 's/^ *//;s/ *\$//')"
+      echo "    //Snapshot #\$num - \$cleandesc"
       echo "        protocol: linux"
-      echo "        kernel_path: boot():/kernels/vmlinuz-$KVER"
-      echo "        module_path: boot():/kernels/initrd.img-$KVER"
-      echo "        cmdline: root=/dev/mapper/LUKS_MAPPER_NAME_PLACEHOLDER rootflags=subvol=@snapshots/$num/snapshot rw"
+      echo "        kernel_path: boot():/kernels/vmlinuz-\$KVER"
+      echo "        module_path: boot():/kernels/initrd.img-\$KVER"
+      echo "        cmdline: root=/dev/mapper/LUKS_MAPPER_NAME_PLACEHOLDER rootflags=subvol=@snapshots/\$num/snapshot rw"
     done
   fi
   echo "//+Snapshot home"
   if command -v snapper >/dev/null 2>&1; then
     snapper -c home list --columns number,date,description --disable-used-space 2>/dev/null | tail -n +3 | while IFS='|' read -r num date desc; do
-      num="$(echo "$num" | tr -d ' ')"
-      [ -z "$num" ] && continue
-      cleandesc="$(echo "$desc" | sed 's/^ *//;s/ *$//')"
-      echo "    //Snapshot home #$num - $cleandesc"
+      num="\$(echo "\$num" | tr -d ' ')"
+      [ -z "\$num" ] && continue
+      cleandesc="\$(echo "\$desc" | sed 's/^ *//;s/ *\$//')"
+      echo "    //Snapshot home #\$num - \$cleandesc"
       echo "        protocol: linux"
-      echo "        kernel_path: boot():/kernels/vmlinuz-$KVER"
-      echo "        module_path: boot():/kernels/initrd.img-$KVER"
+      echo "        kernel_path: boot():/kernels/vmlinuz-\$KVER"
+      echo "        module_path: boot():/kernels/initrd.img-\$KVER"
       echo "        cmdline: root=/dev/mapper/LUKS_MAPPER_NAME_PLACEHOLDER rootflags=subvol=@ rw"
     done
   fi
   echo "#### LIMINE-SNAPSHOT-SYNC:END"
-} >> "$TMP"
+} >> "\$TMP"
 
-mv "$TMP" "$CONF"
+mv "\$TMP" "\$CONF"
 SYNCEOF
 # LUKS_MAPPER_NAME è deciso all'avvio dello script principale (sull'host),
 # quindi va iniettato con un sed dopo la scrittura quotata qui sopra, invece
@@ -639,15 +767,45 @@ main() {
   check_environment
   install_host_dependencies
 
+  list_disks
   list_partitions
-  EFI_PART="$(choose_partition "Scegli la partizione da usare come ESP (EFI System Partition, FAT32):")"
-  LUKS_PART="$(choose_partition "Scegli la partizione su cui installare LUKS2+BTRFS:" "$EFI_PART")"
+
+  local existing_count
+  existing_count="$(partition_paths | wc -l | tr -d ' ')"
+
+  if [ "$existing_count" -eq 0 ]; then
+    log_warn "Nessuna partizione trovata su nessun disco: serve ripartizionare un disco da zero."
+    partition_whole_disk
+  else
+    echo
+    echo "Partizioni già presenti sul sistema (vedi elenco sopra)."
+    echo "  1) Usa partizioni esistenti (le scelgo io dalla lista)"
+    echo "  2) Ripartiziona un disco intero da zero (cancella tutto quel disco)"
+    local mode_choice
+    while true; do
+      read -rp "Scelta [1/2]: " mode_choice
+      case "$mode_choice" in
+        1) break ;;
+        2) partition_whole_disk; break ;;
+        *) log_err "Scelta non valida." ;;
+      esac
+    done
+  fi
+
+  # Se partition_whole_disk ha già impostato EFI_PART/LUKS_PART, salto la
+  # selezione manuale; altrimenti (partizioni esistenti) la faccio scegliere.
+  if [ -z "${EFI_PART:-}" ]; then
+    EFI_PART="$(choose_partition "Scegli la partizione da usare come ESP (EFI System Partition, FAT32):")"
+    LUKS_PART="$(choose_partition "Scegli la partizione su cui installare LUKS2+BTRFS:" "$EFI_PART")"
+  fi
 
   DISK_DEV="/dev/$(lsblk -rno PKNAME "$EFI_PART")"
   EFI_PART_NUM="$(lsblk -rno NAME "$EFI_PART" | sed -E 's/^.*[a-z]([0-9]+)$/\1/')"
 
   prompt_user_details
-  FORMAT_ESP=0
+  # FORMAT_ESP è già =1 se la partizione è stata appena creata da
+  # partition_whole_disk; altrimenti va deciso qui (partizione preesistente).
+  [ -z "${FORMAT_ESP:-}" ] && decide_esp_format
   confirm_summary
 
   setup_esp
