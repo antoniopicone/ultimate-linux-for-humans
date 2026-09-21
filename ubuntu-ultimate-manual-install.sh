@@ -609,13 +609,40 @@ echo 'SNAPPER_CONFIGS="root home"' > /etc/conf.d/snapper
 # se i nomi dei timer differiscono in questa release di Ubuntu, va corretto a mano
 systemctl enable snapper-timeline.timer snapper-cleanup.timer 2>/dev/null || true
 
-# --- Limine: binario precompilato upstream (ramo "\$LIMINE_BINARY_BRANCH"),
-#     NESSUNA build da sorgente qui (scelta deliberata: niente toolchain
-#     clang/lld/llvm da tirare dentro il chroot solo per questo script
-#     interattivo — a differenza della ricetta autoinstall che compila da
-#     sorgente per altri motivi; il binario precompilato upstream è lo
-#     stesso artefatto, solo distribuito già pronto).
-git clone --depth 1 --branch "\$LIMINE_BINARY_BRANCH" https://github.com/limine-bootloader/limine.git /opt/limine-src
+# --- Limine: binario precompilato upstream. NESSUNA build da sorgente qui
+#     (scelta deliberata: niente toolchain clang/lld/llvm da tirare dentro
+#     il chroot solo per questo script interattivo).
+#
+#     Il ramo "latest-binary" che upstream documentava è stato rimosso ad un
+#     certo punto (visto succedere davvero: git clone falliva con "Remote
+#     branch latest-binary not found") — il progetto usa rami versionati
+#     "vN.x-binary" e la N cambia nel tempo (v7, v8, ... la versione stabile
+#     più recente nota a fine training era addirittura 11.x). Hardcodare un
+#     numero specifico qui si romperebbe di nuovo alla prossima major, quindi
+#     lo script SCOPRE da solo il ramo "vN.x-binary" con N più alto via
+#     'git ls-remote', invece di fidarsi di un valore fisso.
+LIMINE_REPO="https://github.com/limine-bootloader/limine.git"
+LIMINE_BRANCH_RESOLVED="\$LIMINE_BINARY_BRANCH"
+if [ "\$LIMINE_BRANCH_RESOLVED" = "latest-binary" ]; then
+  echo "Cerco dinamicamente il ramo binario Limine più recente su \$LIMINE_REPO..."
+  DETECTED="\$(git ls-remote --heads "\$LIMINE_REPO" 2>/dev/null \\
+    | sed -E 's#.*refs/heads/##' \\
+    | grep -E '^v[0-9]+\\.x-binary\$' \\
+    | sed -E 's/^v([0-9]+)\\.x-binary\$/\\1 &/' \\
+    | sort -n \\
+    | awk '{print \$2}' \\
+    | tail -1)"
+  if [ -n "\$DETECTED" ]; then
+    LIMINE_BRANCH_RESOLVED="\$DETECTED"
+    echo "Ramo Limine rilevato dinamicamente: \$LIMINE_BRANCH_RESOLVED"
+  else
+    echo "ATTENZIONE: rilevamento dinamico del ramo Limine fallito (nessun vN.x-binary trovato)." >&2
+    echo "Imposta LIMINE_BINARY_BRANCH=<ramo corretto> come variabile d'ambiente prima di rilanciare lo script." >&2
+    echo "Controlla https://github.com/limine-bootloader/limine/branches (o, se il progetto si è spostato, https://codeberg.org/Limine/Limine) per il nome giusto." >&2
+    exit 1
+  fi
+fi
+git clone --depth 1 --branch "\$LIMINE_BRANCH_RESOLVED" "\$LIMINE_REPO" /opt/limine-src
 mkdir -p /boot/efi/EFI/BOOT /boot/efi/EFI/limine
 cp -v /opt/limine-src/BOOTAA64.EFI /boot/efi/EFI/BOOT/BOOTAA64.EFI
 cp -v /opt/limine-src/BOOTAA64.EFI /boot/efi/EFI/limine/BOOTAA64.EFI
