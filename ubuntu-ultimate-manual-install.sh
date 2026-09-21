@@ -489,7 +489,19 @@ USER_EMAIL="${USER_EMAIL}"
 LIMINE_BINARY_BRANCH="${LIMINE_BINARY_BRANCH}"
 
 echo "\$HOSTNAME_VAL" > /etc/hostname
-sed -i "1i 127.0.1.1\t\$HOSTNAME_VAL" /etc/hosts
+# debootstrap --variant=minbase NON garantisce che /etc/hosts esista già
+# (lo fornisce netbase, non sempre incluso in minbase) — lo scriviamo da
+# zero invece di editarlo con sed, altrimenti fallisce con "No such file".
+cat > /etc/hosts <<HOSTSEOF
+127.0.0.1	localhost
+127.0.1.1	${HOSTNAME_VAL}
+
+::1	ip6-localhost ip6-loopback
+fe00::0	ip6-localnet
+ff00::0	ip6-mcastprefix
+ff02::1	ip6-allnodes
+ff02::2	ip6-allrouters
+HOSTSEOF
 
 ln -sf /usr/share/zoneinfo/UTC /etc/localtime
 locale-gen en_US.UTF-8 >/dev/null 2>&1 || true
@@ -508,7 +520,7 @@ apt-get install -y --no-install-recommends \
   btrfs-progs snapper \
   dosfstools efibootmgr \
   sudo network-manager openssh-server \
-  git curl ca-certificates locales \
+  git curl ca-certificates locales netbase \
   systemd-zram-generator \
   console-setup keyboard-configuration
 
