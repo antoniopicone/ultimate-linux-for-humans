@@ -675,6 +675,23 @@ timeout: 5
 #### LIMINE-SNAPSHOT-SYNC:END
 LIMINECONFEOF
 
+# Limine cerca limine.conf in punti diversi a seconda di COME è stato avviato
+# (visto succedere davvero: con più device di boot presenti — es. il
+# supporto live ancora collegato — Limine può non riuscire a determinare
+# in modo affidabile da quale volume/EFI-app è partito, e la ricerca di
+# fallback cambia percorso di conseguenza). Invece di indovinare un unico
+# percorso "giusto", la copia canonica sopra viene propagata su TUTTI i
+# percorsi che la documentazione ufficiale elenca (ordine attuale v12.x:
+# <cartella del proprio .efi>/limine.conf per primo, poi la scansione delle
+# partizioni; ordine legacy: boot/limine, boot, limine, radice) — non sono
+# symlink perché FAT32 non li supporta (stesso limite già noto per /boot).
+mkdir -p /boot/efi/EFI/BOOT /boot/efi/EFI/limine /boot/efi/limine /boot/efi/boot/limine
+cp -v /boot/efi/limine.conf /boot/efi/EFI/BOOT/limine.conf
+cp -v /boot/efi/limine.conf /boot/efi/EFI/limine/limine.conf
+cp -v /boot/efi/limine.conf /boot/efi/limine/limine.conf
+cp -v /boot/efi/limine.conf /boot/efi/boot/limine.conf
+cp -v /boot/efi/limine.conf /boot/efi/boot/limine/limine.conf
+
 # --- hook di sincronizzazione kernel: copia vmlinuz/initrd sull'ESP ad ogni
 #     aggiornamento kernel (equivalente Limine dello zz-limine-kernel-sync
 #     già usato nella ricetta autoinstall per x86).
@@ -690,6 +707,11 @@ mkdir -p "\$ESP/kernels"
 # tutto il resto del file inclusi i marcatori degli snapshot
 sed -i "s#kernel_path: boot():/kernels/vmlinuz-.*#kernel_path: boot():/kernels/vmlinuz-\$KVER#" "\$ESP/limine.conf"
 sed -i "s#module_path: boot():/kernels/initrd.img-.*#module_path: boot():/kernels/initrd.img-\$KVER#" "\$ESP/limine.conf"
+# ripropaga su tutte le copie (vedi commento nella scrittura iniziale di
+# limine.conf sul perché esistono più copie invece di un unico file)
+for dst in "\$ESP/EFI/BOOT/limine.conf" "\$ESP/EFI/limine/limine.conf" "\$ESP/limine/limine.conf" "\$ESP/boot/limine.conf" "\$ESP/boot/limine/limine.conf"; do
+  [ -f "\$dst" ] && cp -f "\$ESP/limine.conf" "\$dst"
+done
 HOOKEOF
 chmod +x /etc/kernel/postinst.d/zz-limine-kernel-sync
 
@@ -750,6 +772,12 @@ awk '/#### LIMINE-SNAPSHOT-SYNC:BEGIN/{print;f=1;next} /#### LIMINE-SNAPSHOT-SYN
 } >> "\$TMP"
 
 mv "\$TMP" "\$CONF"
+
+# ripropaga su tutte le copie (vedi commento nella scrittura iniziale di
+# limine.conf, blocco Limine sopra, sul perché esistono più copie)
+for dst in "\$ESP/EFI/BOOT/limine.conf" "\$ESP/EFI/limine/limine.conf" "\$ESP/limine/limine.conf" "\$ESP/boot/limine.conf" "\$ESP/boot/limine/limine.conf"; do
+  [ -f "\$dst" ] && cp -f "\$CONF" "\$dst"
+done
 SYNCEOF
 # LUKS_MAPPER_NAME è deciso all'avvio dello script principale (sull'host),
 # quindi va iniettato con un sed dopo la scrittura quotata qui sopra, invece
